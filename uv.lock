@@ -4,10 +4,11 @@ requires-python = ">=3.12"
 [[package]]
 name = "card2vec"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "requests" },
     { name = "torch" },
+    { name = "tqdm" },
     { name = "transformers" },
 ]
 
@@ -21,6 +22,7 @@ dev = [
 requires-dist = [
     { name = "requests", specifier = ">=2.32.3" },
     { name = "torch", specifier = ">=2.5.1" },
+    { name = "tqdm", specifier = ">=4.67.1" },
     { name = "transformers", specifier = ">=4.48.0" },
 ]
 
