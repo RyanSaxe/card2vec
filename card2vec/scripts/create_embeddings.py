@@ -7,11 +7,12 @@ import torch
 from tqdm import tqdm
 from transformers import AutoModel, AutoTokenizer
 
-from card2vec.cards.load import load_cards, simple_converter
+from card2vec.cards.load import EmbeddingMetaData, load_cards, simple_converter
 from card2vec.utils import DATA_DIR
 
 DEFAULT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DEFAULT_MODEL = "gpt2"
+
 
 def create_embeddings(
     card_texts: list[str],
@@ -27,6 +28,7 @@ def create_embeddings(
     model.eval()
 
     total = len(card_texts)
+    metadata = EmbeddingMetaData(model_name=model_name, embed_dim=model.embed_dim, num_cards=total)
 
     # TODO: possibly should save in chunks? to never have to load it into memory?
     all_embeddings = np.empty(shape=(total, model.embed_dim), dtype=np.float32)
@@ -43,26 +45,26 @@ def create_embeddings(
         # for each text in the batch, extract the corresponding embedding from the transformer
         last_hidden_state = outputs.last_hidden_state  # Shape: (batch_size, seq_length, embed_dim)
         cur_batch_size = last_hidden_state.size(0)
-        lengths = inputs['attention_mask'].sum(dim=1).long()
+        lengths = inputs["attention_mask"].sum(dim=1).long()
         last_token_idxs = (lengths - 1).clamp(min=0)
         batch_indices = torch.arange(cur_batch_size, device=last_hidden_state.device)
         embeddings = last_hidden_state[batch_indices, last_token_idxs, :]
         all_embeddings[start_idx:end_idx, :] = embeddings.numpy()
 
-    return all_embeddings
+    return all_embeddings, metadata
+
 
 # TODO: let this have command line args for converters and model specifications
 if __name__ == "__main__":
     card_names, card_texts = zip(*load_cards(simple_converter, max_workers=4))
-
-    embeddings, metadata = create_embeddings(card_texts, batch_size=32)
+    embeddings, metadata = create_embeddings(card_texts, batch_size=8)
 
     emb_dir = DATA_DIR / "embs"
     os.makedirs(emb_dir, exist_ok=True)
 
     with open(emb_dir / "embs.npy", "wb") as f:
         np.save(f, embeddings)
-    
+
     with open(emb_dir / "card_names.npy", "wb") as f:
         np.save(f, card_names)
 
