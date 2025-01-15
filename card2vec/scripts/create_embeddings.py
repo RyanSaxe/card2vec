@@ -1,3 +1,5 @@
+import json
+import os
 from typing import Literal
 
 import numpy as np
@@ -5,17 +7,18 @@ import torch
 from tqdm import tqdm
 from transformers import AutoModel, AutoTokenizer
 
-from card2vec.cards.load import EmbeddingMetaData, load_cards, simple_converter
+from card2vec.cards.load import load_cards, simple_converter
+from card2vec.utils import DATA_DIR
 
 DEFAULT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DEFAULT_MODEL = "gpt2"
 
 def create_embeddings(
-    card_texts,
+    card_texts: list[str],
     model_name: str = DEFAULT_MODEL,
     device: Literal["cpu", "cuda"] = DEFAULT_DEVICE,
     batch_size: int = 256,
-) -> tuple[np.ndarray, EmbeddingMetaData]:
+) -> dict[str, np.ndarray]:
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     # TODO: double check end of string token as padder wont cause model related problems
     if tokenizer.pad_token is None:
@@ -25,9 +28,8 @@ def create_embeddings(
 
     total = len(card_texts)
 
-    metadata = EmbeddingMetaData(model_name=model_name, embed_dim=model.embed_dim, num_cards=total)
-
-    all_embeddings = np.empty(shape=(total, model.embed_dim))
+    # TODO: possibly should save in chunks? to never have to load it into memory?
+    all_embeddings = np.empty(shape=(total, model.embed_dim), dtype=np.float32)
     for start_idx in tqdm(range(0, total, batch_size)):
         end_idx = min(start_idx + batch_size, total)
         batched_card_data = card_texts[start_idx:end_idx]
@@ -45,20 +47,24 @@ def create_embeddings(
         last_token_idxs = (lengths - 1).clamp(min=0)
         batch_indices = torch.arange(cur_batch_size, device=last_hidden_state.device)
         embeddings = last_hidden_state[batch_indices, last_token_idxs, :]
-        all_embeddings[start_idx:end_idx, :] = embeddings
+        all_embeddings[start_idx:end_idx, :] = embeddings.numpy()
 
-    return all_embeddings, metadata
+    return all_embeddings
 
-
-# Example usage:
+# TODO: let this have command line args for converters and model specifications
 if __name__ == "__main__":
     card_names, card_texts = zip(*load_cards(simple_converter, max_workers=4))
 
-    embeddings = create_embeddings(card_texts)
+    embeddings, metadata = create_embeddings(card_texts, batch_size=32)
 
-    os.makedirs(DATA_DIR, exist_ok=True)
+    emb_dir = DATA_DIR / "embs"
+    os.makedirs(emb_dir, exist_ok=True)
 
-    for title, vec in vectors.items():
-        print(f"{title}: vector shape = {vec.shape}")
-        print(vec)
-        break
+    with open(emb_dir / "embs.npy", "wb") as f:
+        np.save(f, embeddings)
+    
+    with open(emb_dir / "card_names.npy", "wb") as f:
+        np.save(f, card_names)
+
+    with open(emb_dir / "metadata.json", "w") as f:
+        json.dump(metadata, f)
