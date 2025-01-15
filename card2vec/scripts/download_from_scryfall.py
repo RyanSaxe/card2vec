@@ -1,11 +1,9 @@
 import os
-import pathlib
 
 import requests
 from tqdm import tqdm
 
-ROOT = pathlib.Path(__file__).parent.parent.parent
-DATA_DIR = ROOT / "data"
+from card2vec.utils import DATA_DIR
 
 
 def download_card_data() -> None:

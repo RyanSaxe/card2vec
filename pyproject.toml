@@ -17,6 +17,9 @@ dev = [
     "ruff>=0.9.1",
 ]
 
+[tool.ruff]
+line-length = 120
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
