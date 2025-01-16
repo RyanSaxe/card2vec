@@ -1,4 +1,10 @@
-import pathlib
+from pathlib import Path
 
-ROOT = pathlib.Path(__file__).parent.parent
-DATA_DIR = ROOT / "data"
+REPO = Path(__file__).parent.parent
+DATA_DIR = REPO / "data"
+
+
+def to_path(fpath: str | Path) -> Path:
+    if not isinstance(fpath, Path):
+        return Path(fpath)
+    return fpath

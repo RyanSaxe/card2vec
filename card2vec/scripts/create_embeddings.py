@@ -1,5 +1,3 @@
-import json
-import os
 from typing import Literal
 
 import numpy as np
@@ -8,7 +6,6 @@ from tqdm import tqdm
 from transformers import AutoModel, AutoTokenizer
 
 from card2vec.cards.load import EmbeddingMetaData, load_cards, simple_converter
-from card2vec.utils import DATA_DIR
 
 DEFAULT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DEFAULT_MODEL = "gpt2"
@@ -58,15 +55,3 @@ def create_embeddings(
 if __name__ == "__main__":
     card_names, card_texts = zip(*load_cards(simple_converter, max_workers=4))
     embeddings, metadata = create_embeddings(card_texts, batch_size=8)
-
-    emb_dir = DATA_DIR / "embs"
-    os.makedirs(emb_dir, exist_ok=True)
-
-    with open(emb_dir / "embs.npy", "wb") as f:
-        np.save(f, embeddings)
-
-    with open(emb_dir / "card_names.npy", "wb") as f:
-        np.save(f, card_names)
-
-    with open(emb_dir / "metadata.json", "w") as f:
-        json.dump(metadata, f)

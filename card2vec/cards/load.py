@@ -9,6 +9,7 @@ import numpy as np
 from card2vec.utils import DATA_DIR
 
 
+# TODO: create types that contains all scryfall valid card fields
 class Card(TypedDict, total=False):
     name: str
     oracle_text: str
