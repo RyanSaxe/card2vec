@@ -1,10 +1,6 @@
 import json
-import os
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from typing import Callable, TypedDict
-
-import numpy as np
 
 from card2vec.utils import DATA_DIR
 
@@ -24,6 +20,9 @@ def load_cards(converter: CardConverter, max_workers: int = 4) -> list[tuple[str
     with open(DATA_DIR / "cards.json", "r") as file:
         cards = json.load(file)
 
+    # be able to skip stuff like tokens/emblems/etc
+    # ensure names card["name"] is unique
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         return list(executor.map(converter, cards))
 
@@ -38,54 +37,19 @@ def simple_converter(card: Card) -> tuple[str, str]:
     return card["name"], oracle_text
 
 
-def check_emb_dir_validity(fnames: list[str]):
-    if "embs.npy" not in fnames:
-        raise ValueError("Embedding Directory is missing embs.npy")
-    if "card_names.npy" not in fnames:
-        raise ValueError("Embedding Directory is missing names.npy")
-    if "metadata.json" not in fnames:
-        raise ValueError("Embedding Directory is missing metadata")
+def to_xml(card: Card, outer_tag: str | None, *tags: str):
+    tagged = [f"<{tag}>{card[tag]}</{tag}>" for tag in tags.items() if tag in card]
+    if outer_tag is not None:
+        tagged = [f"<{outer_tag}>", *tagged, f"</{outer_tag}>"]
+    return "\n".join(tagged)
 
 
-class EmbeddingMetaData(TypedDict):
-    model_name: str
-    embed_dim: int
-    num_cards: int
+def card_to_prompt(card: Card, *card_properties) -> tuple[str, str]:
+    if "card_faces" in card:
+        front_xml = to_xml(card["card_faces"][0], outer_tag="front", *card_properties)
+        back_xml = to_xml(card["card_faces"][1], outer_tag="back", *card_properties)
+        return card["name"], f"<card>\n{front_xml}\n{back_xml}\n</card>"
+    return card["name"], to_xml(card, outer_tag="card", *card_properties)
 
-
-def load_embeddings(fpath: str | Path, *card_names: str) -> np.typing.NDArray:
-    if not isinstance(fpath, Path):
-        fpath = Path(fpath)
-
-    files = os.listdir(fpath)
-    check_emb_dir_validity(files)
-
-    if len(card_names) == 0:
-        ...
-
-    with open(fpath / "metadata.json", "r") as f:
-        metadata: EmbeddingMetaData = json.load(f)
-
-    embeddings = np.memmap(
-        fpath / "embs.npy", mode="r", dtype=np.float32, shape=(metadata["num_cards"], metadata["embed_dim"])
-    )
-
-    if len(card_names) == 0:
-        return embeddings
-
-    names = np.load(fpath / "card_names.npy")
-    print(names[0])
-    indices = [np.where(names == name) for name in card_names]
-    print(indices)
-    return embeddings[indices]
-
-
-import sys
-
-if __name__ == "__main__":
-    args = sys.argv[1:]
-    print(args)
-    assert len(args) >= 2
-    embeddings = load_embeddings(args[0], *args[1:])
-    print(embeddings)
-    print(embeddings.shape)
+    # possibly use xml tags?
+    ...
