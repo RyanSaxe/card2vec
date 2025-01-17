@@ -14,8 +14,17 @@ from transformers import AutoModel, AutoTokenizer
 from card2vec.cards.load import CardConverter, load_cards
 from card2vec.utils import DATA_DIR, to_path
 
-DEFAULT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-DEFAULT_MODEL = "gpt2"
+# ranked 7 on benchmark for retrieval, but has really high generic performance and is well known
+# requires ~30GB RAM
+DEFAULT_MODEL = "gte-Qwen2-7B-instruct"
+# ranked 5 on benchmark, but requires 5.75GB RAM, which is incredibly low for these models
+# small model parameter size (1.5B), but high emb_dim (~8k, which is double most others in this space)
+DEFAULT_MODEL_LOW_RAM = "stella_en_1.5B_v5"
+# ranked 1 on benchmark, but is huggingface doesnt specify as much details on this one
+BEST_MODEL = "voyage-3-m-exp"
+
+Device = Literal["cpu", "cuda"]
+DEFAULT_DEVICE: Device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 class EmbeddingMetaData(TypedDict):
@@ -24,10 +33,41 @@ class EmbeddingMetaData(TypedDict):
     num_cards: int
 
 
+def prepare_model(model_name: str = DEFAULT_MODEL, device: Device = DEFAULT_DEVICE, inference: bool = True):
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    # TODO: double check end of string token as padder wont cause model related problems
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    model = AutoModel.from_pretrained(model_name).to(device)
+    if inference:
+        model.eval()
+    return tokenizer, model
+
+
+def extract_embeddings(texts: list[str], model: AutoModel, tokenizer: AutoTokenizer, device: Device):
+    inputs = tokenizer(texts, return_tensors="pt", padding=True)
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    with torch.no_grad():
+        outputs = model(**inputs)
+
+    # for each text in the batch, extract the corresponding embedding from the transformer
+    last_hidden_state = outputs.last_hidden_state  # Shape: (batch_size, seq_length, embed_dim)
+    cur_batch_size = last_hidden_state.size(0)
+    lengths = inputs["attention_mask"].sum(dim=1).long()
+    last_token_idxs = (lengths - 1).clamp(min=0)
+    batch_indices = torch.arange(cur_batch_size, device=last_hidden_state.device)
+    return last_hidden_state[batch_indices, last_token_idxs, :]
+
+
 class CardEmbeddings:
     def __init__(self, card_names: list[str], embeddings: np.ndarray, metadata: EmbeddingMetaData):
+        # TODO: possibly should integrate card names with metadata? Is it normal to store JSON with 30k size lists
         if len(card_names) != embeddings.shape[0]:
             raise ValueError("Number of card names must match number of embeddings.")
+        if embeddings.shape != (metadata["num_cards"], metadata["embed_dim"]):
+            raise ValueError(
+                f"Expected shape {(metadata['num_cards'], metadata['embed_dim'])}, but got {embeddings.shape}"
+            )
 
         self.embeddings = embeddings
         self.card_names = card_names
@@ -38,20 +78,14 @@ class CardEmbeddings:
         cls,
         converter: CardConverter,
         model_name: str = DEFAULT_MODEL,
-        device: Literal["cpu", "cuda"] = DEFAULT_DEVICE,
+        device: Device = DEFAULT_DEVICE,
         batch_size: int = 256,
         max_workers: int = 4,
     ) -> dict[str, np.ndarray]:
         card_names, card_texts = zip(*load_cards(converter, max_workers=max_workers))
-
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        # TODO: double check end of string token as padder wont cause model related problems
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-        model = AutoModel.from_pretrained(model_name).to(device)
-        model.eval()
-
         total = len(card_texts)
+
+        tokenizer, model = prepare_model(model_name, device, inference=True)
         metadata = EmbeddingMetaData(model_name=model_name, embed_dim=model.embed_dim, num_cards=total)
 
         # TODO: possibly should save in chunks? to never have to load it into memory?
@@ -60,19 +94,7 @@ class CardEmbeddings:
             end_idx = min(start_idx + batch_size, total)
             batched_card_data = card_texts[start_idx:end_idx]
 
-            # call the transformer with the properly formatted data from the batch
-            inputs = tokenizer(batched_card_data, return_tensors="pt", padding=True)
-            inputs = {k: v.to(device) for k, v in inputs.items()}
-            with torch.no_grad():
-                outputs = model(**inputs)
-
-            # for each text in the batch, extract the corresponding embedding from the transformer
-            last_hidden_state = outputs.last_hidden_state  # Shape: (batch_size, seq_length, embed_dim)
-            cur_batch_size = last_hidden_state.size(0)
-            lengths = inputs["attention_mask"].sum(dim=1).long()
-            last_token_idxs = (lengths - 1).clamp(min=0)
-            batch_indices = torch.arange(cur_batch_size, device=last_hidden_state.device)
-            embeddings = last_hidden_state[batch_indices, last_token_idxs, :]
+            embeddings = extract_embeddings(batched_card_data, model, tokenizer, device)
             all_embeddings[start_idx:end_idx, :] = embeddings.numpy()
 
         return cls(card_names, all_embeddings, metadata)
@@ -91,11 +113,11 @@ class CardEmbeddings:
         names = np.load(fpath / "card_names.npy")
         return cls(names.tolist(), embeddings, metadata)
 
-    def save(self, dir_name: str | Path | None = None):
-        if dir_name is None:
+    def save(self, directory: str | Path | None = None):
+        if directory is None:
             emb_dir = DATA_DIR / "embs"
         else:
-            emb_dir = to_path(dir_name)
+            emb_dir = to_path(directory)
 
         os.makedirs(emb_dir, exist_ok=True)
 
@@ -140,6 +162,7 @@ class CardEmbeddings:
             f"of {score}, which is below the required threshold of {fuzzy_search_threshold}"
         )
 
+    # TODO: let text based search work here? Like if it's not a valid card name, you can still fidn stuff
     def find_closest_n_cards(self, card_name: str, n: int, threshold: float = 80) -> dict[str, np.ndarray]:
         card_embedding = self.get_embedding(card_name, fuzzy_search_threshold=threshold)
         distances = self._compute_all_distances_vectorized(card_embedding)
@@ -153,6 +176,8 @@ class CardEmbeddings:
 
     # NOTE: there aren't enough magic cards to care about doing approximate nearest neighbors, so
     #       we can just do the naive approach where we actually compute the distance to all cards
+    # TODO: self.embeddings will be from an np.memmap. Figure out how to configure this function in order
+    #       to do it in chunks to avoid materializing the whole matrix, but only if the matrix is too large
     def _compute_all_distances_vectorized(self, card_embedding: np.ndarray) -> np.ndarray:
         v = np.squeeze(card_embedding)  # shape (embedding_dim,)
         norm_v = np.linalg.norm(v)
