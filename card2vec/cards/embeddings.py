@@ -1,5 +1,6 @@
 import json
 import os
+import pickle
 import string
 import warnings
 from pathlib import Path
@@ -14,14 +15,8 @@ from transformers import AutoModel, AutoTokenizer
 from card2vec.cards.load import CardConverter, load_cards
 from card2vec.utils import DATA_DIR, to_path
 
-# ranked 7 on benchmark for retrieval, but has really high generic performance and is well known
-# requires ~30GB RAM
-DEFAULT_MODEL = "gte-Qwen2-7B-instruct"
-# ranked 5 on benchmark, but requires 5.75GB RAM, which is incredibly low for these models
-# small model parameter size (1.5B), but high emb_dim (~8k, which is double most others in this space)
-DEFAULT_MODEL_LOW_RAM = "stella_en_1.5B_v5"
-# ranked 1 on benchmark, but is huggingface doesnt specify as much details on this one
-BEST_MODEL = "voyage-3-m-exp"
+DEFAULT_MODEL = "Alibaba-NLP/gte-large-en-v1.5"
+OTHER_MODELS = ["WhereIsAI/UAE-Large-V1", "sentence-transformers/all-mpnet-base-v2"]
 
 Device = Literal["cpu", "cuda"]
 DEFAULT_DEVICE: Device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -44,7 +39,7 @@ def prepare_model(model_name: str = DEFAULT_MODEL, device: Device = DEFAULT_DEVI
     return tokenizer, model
 
 
-def extract_embeddings(texts: list[str], model: AutoModel, tokenizer: AutoTokenizer, device: Device):
+def extract_embeddings(texts: list[str], model: AutoModel, tokenizer: AutoTokenizer, device: Device) -> torch.Tensor:
     inputs = tokenizer(texts, return_tensors="pt", padding=True)
     inputs = {k: v.to(device) for k, v in inputs.items()}
     with torch.no_grad():
@@ -60,7 +55,9 @@ def extract_embeddings(texts: list[str], model: AutoModel, tokenizer: AutoTokeni
 
 
 class CardEmbeddings:
-    def __init__(self, card_names: list[str], embeddings: np.ndarray, metadata: EmbeddingMetaData):
+    def __init__(
+        self, card_names: list[str], embeddings: np.ndarray, metadata: EmbeddingMetaData, converter: CardConverter
+    ):
         # TODO: possibly should integrate card names with metadata? Is it normal to store JSON with 30k size lists
         if len(card_names) != embeddings.shape[0]:
             raise ValueError("Number of card names must match number of embeddings.")
@@ -72,6 +69,7 @@ class CardEmbeddings:
         self.embeddings = embeddings
         self.card_names = card_names
         self.metadata = metadata
+        self.converter = converter
 
     @classmethod
     def create(
@@ -81,23 +79,25 @@ class CardEmbeddings:
         device: Device = DEFAULT_DEVICE,
         batch_size: int = 256,
         max_workers: int = 4,
-    ) -> dict[str, np.ndarray]:
+    ) -> Self:
         card_names, card_texts = zip(*load_cards(converter, max_workers=max_workers))
         total = len(card_texts)
 
         tokenizer, model = prepare_model(model_name, device, inference=True)
-        metadata = EmbeddingMetaData(model_name=model_name, embed_dim=model.embed_dim, num_cards=total)
 
         # TODO: possibly should save in chunks? to never have to load it into memory?
-        all_embeddings = np.empty(shape=(total, model.embed_dim), dtype=np.float32)
+        all_embeddings = None
         for start_idx in tqdm(range(0, total, batch_size)):
             end_idx = min(start_idx + batch_size, total)
             batched_card_data = card_texts[start_idx:end_idx]
 
             embeddings = extract_embeddings(batched_card_data, model, tokenizer, device)
+            if all_embeddings is None:
+                all_embeddings = np.empty(shape=(total, embeddings.shape[1]), dtype=np.float32)
             all_embeddings[start_idx:end_idx, :] = embeddings.numpy()
 
-        return cls(card_names, all_embeddings, metadata)
+        metadata = EmbeddingMetaData(model_name=model_name, embed_dim=all_embeddings.shape[1], num_cards=total)
+        return cls(card_names, all_embeddings, metadata, converter)
 
     @classmethod
     def load(cls, fpath: str | Path) -> Self:
@@ -106,12 +106,15 @@ class CardEmbeddings:
         with open(fpath / "metadata.json", "r") as f:
             metadata: EmbeddingMetaData = json.load(f)
 
+        with open(fpath / "converter.pkl", "rb") as f:
+            converter: CardConverter = pickle.load(f)
+
         embeddings = np.memmap(
             fpath / "embs.npy", mode="r", dtype=np.float32, shape=(metadata["num_cards"], metadata["embed_dim"])
         )
 
         names = np.load(fpath / "card_names.npy")
-        return cls(names.tolist(), embeddings, metadata)
+        return cls(names.tolist(), embeddings, metadata, converter)
 
     def save(self, directory: str | Path | None = None):
         if directory is None:
@@ -130,10 +133,12 @@ class CardEmbeddings:
         with open(emb_dir / "metadata.json", "w") as f:
             json.dump(self.metadata, f)
 
+        with open(emb_dir / "converter.pkl", "wb") as f:
+            pickle.dump(self.converter, f)
+
     def get_embedding(self, card_name: str, fuzzy_search_threshold: float = 0) -> np.ndarray:
         if card_name in self.card_names:
-            card_index = np.where(self.card_names == card_name)[0]
-            return self.embeddings[card_index]
+            return self.embeddings[self.card_names.index(card_name)]
 
         if fuzzy_search_threshold == 0:
             raise KeyError(f"{card_name} is not a valid card name.")
@@ -154,8 +159,7 @@ class CardEmbeddings:
         )
 
         if score >= fuzzy_search_threshold:
-            card_index = np.where(self.card_names == matched_card_name)[0]
-            return self.embeddings[card_index]
+            return self.embeddings[self.card_names.index(card_name)]
 
         raise KeyError(
             f"Key '{card_name}''s closest match was {matched_card_name} at a similarity"
@@ -169,7 +173,7 @@ class CardEmbeddings:
         closest_indices = np.argsort(distances)
         if closest_indices[0] == card_name:
             warnings.warn(f"Target card {card_name} should always be the closest card. Probably a bug.")
-        closest_indices = closest_indices[1 : n + 1]
+        closest_indices = closest_indices[: n + 1]
         closest_card_names = [self.card_names[i] for i in closest_indices]
         closest_embeddings = self.embeddings[closest_indices]
         return dict(zip(closest_card_names, closest_embeddings))
@@ -187,6 +191,20 @@ class CardEmbeddings:
 
 
 if __name__ == "__main__":
-    card_embeddings = CardEmbeddings.load(DATA_DIR / "embs")
-    closest_cards = card_embeddings.find_closest_n_cards("Elvish Mystic", 5)
+    from functools import partial
+
+    from card2vec.cards.load import card_to_prompt
+
+    directory = DATA_DIR / "alibaba"
+
+    converter = partial(
+        card_to_prompt,
+        card_properties=["color_identity", "oracle_text", "power", "toughness", "loyalty"],
+    )
+
+    # card_embeddings = CardEmbeddings.create(converter=converter, batch_size=8)
+    # card_embeddings.save(directory)
+
+    card_embeddings = CardEmbeddings.load(directory)
+    closest_cards = card_embeddings.find_closest_n_cards("Griselbrand", 10)
     print(closest_cards.keys())

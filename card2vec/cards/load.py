@@ -37,19 +37,16 @@ def simple_converter(card: Card) -> tuple[str, str]:
     return card["name"], oracle_text
 
 
-def to_xml(card: Card, outer_tag: str | None, *tags: str):
-    tagged = [f"<{tag}>{card[tag]}</{tag}>" for tag in tags.items() if tag in card]
+def to_xml(card: Card, outer_tag: str | None, tags: list[str]):
+    tagged = [f"<{tag}>{card[tag]}</{tag}>" for tag in tags if tag in card and card[tag] not in [None, ""]]
     if outer_tag is not None:
         tagged = [f"<{outer_tag}>", *tagged, f"</{outer_tag}>"]
     return "\n".join(tagged)
 
 
-def card_to_prompt(card: Card, *card_properties) -> tuple[str, str]:
+def card_to_prompt(card: Card, card_properties: list[str]) -> tuple[str, str]:
     if "card_faces" in card:
-        front_xml = to_xml(card["card_faces"][0], outer_tag="front", *card_properties)
-        back_xml = to_xml(card["card_faces"][1], outer_tag="back", *card_properties)
+        front_xml = to_xml(card["card_faces"][0], outer_tag="front", tags=card_properties)
+        back_xml = to_xml(card["card_faces"][1], outer_tag="back", tags=card_properties)
         return card["name"], f"<card>\n{front_xml}\n{back_xml}\n</card>"
-    return card["name"], to_xml(card, outer_tag="card", *card_properties)
-
-    # possibly use xml tags?
-    ...
+    return card["name"], to_xml(card, outer_tag="card", tags=card_properties)
