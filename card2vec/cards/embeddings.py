@@ -173,7 +173,7 @@ class CardEmbeddings:
         closest_indices = np.argsort(distances)
         if closest_indices[0] == card_name:
             warnings.warn(f"Target card {card_name} should always be the closest card. Probably a bug.")
-        closest_indices = closest_indices[: n + 1]
+        closest_indices = closest_indices[1 : n + 1]
         closest_card_names = [self.card_names[i] for i in closest_indices]
         closest_embeddings = self.embeddings[closest_indices]
         return dict(zip(closest_card_names, closest_embeddings))
@@ -188,23 +188,3 @@ class CardEmbeddings:
         norms = np.linalg.norm(self.embeddings, axis=1)
         # calculate cosine distance
         return 1 - self.embeddings.dot(v) / (norms * norm_v)
-
-
-if __name__ == "__main__":
-    from functools import partial
-
-    from card2vec.cards.load import card_to_prompt
-
-    directory = DATA_DIR / "alibaba"
-
-    converter = partial(
-        card_to_prompt,
-        card_properties=["color_identity", "oracle_text", "power", "toughness", "loyalty"],
-    )
-
-    # card_embeddings = CardEmbeddings.create(converter=converter, batch_size=8)
-    # card_embeddings.save(directory)
-
-    card_embeddings = CardEmbeddings.load(directory)
-    closest_cards = card_embeddings.find_closest_n_cards("Griselbrand", 10)
-    print(closest_cards.keys())
